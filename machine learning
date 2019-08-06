@@ -1,0 +1,533 @@
+# more common imports
+import pandas as pd
+import numpy as np
+from collections import Counter
+import re
+
+# languange processing imports
+import nltk
+from gensim.corpora import Dictionary
+# preprocessing imports
+from sklearn.preprocessing import LabelEncoder
+
+# model imports
+from gensim.models.ldamulticore import LdaMulticore
+from gensim.models.word2vec import Word2Vec
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
+from sklearn.linear_model import LogisticRegression
+# hyperparameter training imports
+from sklearn.model_selection import GridSearchCV
+
+# visualization imports
+from IPython.display import display
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import base64
+import io
+%matplotlib inline
+sns.set()  # defines the style of the plots to be seaborn style
+train_data = pd.read_csv('D:/programs/WinPython-64bit-3.6.2.0Qt5/notebooks/new paper project/LDA & w2v/results/train/train.csv')
+
+print(train_data.shape)
+train_data.head(3)
+#feature inspection
+# check if there's missing data
+train_data.isnull().sum()
+#inspect author variable
+# check if we indeed have three authors
+train_data.author.value_counts().index
+fig, ax = plt.subplots(1,1,figsize=(8,6))
+
+author_vc = train_data.author.value_counts()
+
+ax.bar(range(3), author_vc)
+ax.set_xticks(range(3))
+ax.set_xticklabels(author_vc.index, fontsize=16)
+
+for rect, c, value in zip(ax.patches, ['b', 'r', 'g'], author_vc.values):
+    rect.set_color(c)
+    height = rect.get_height()
+    width = rect.get_width()
+    x_loc = rect.get_x()
+    ax.text(x_loc + width/2, 0.9*height, value, ha='center', va='center', fontsize=18, color='white')
+    #inspect text variable 
+document_lengths = np.array(list(map(len, train_data.text.str.split(' '))))
+
+print("The average number of words in a document is: {}.".format(np.mean(document_lengths)))
+print("The minimum number of words in a document is: {}.".format(min(document_lengths)))
+print("The maximum number of words in a document is: {}.".format(max(document_lengths)))
+fig, ax = plt.subplots(figsize=(15,6))
+
+ax.set_title("Distribution of number of words", fontsize=16)
+ax.set_xlabel("Number of words")
+sns.distplot(document_lengths, bins=50, ax=ax);
+print("There are {} documents with over 150 words.".format(sum(document_lengths > 150)))
+
+shorter_documents = document_lengths[document_lengths <= 150]
+fig, ax = plt.subplots(figsize=(15,6))
+
+ax.set_title("Distribution of number of words", fontsize=16)
+ax.set_xlabel("Number of words")
+sns.distplot(shorter_documents, bins=50, ax=ax);
+print("There are {} documents with tops 5 words.".format(sum(document_lengths <= 5)))
+train_data[document_lengths == 2]
+train_data[document_lengths == 3]
+# find and remove non-ascii words
+# I stored our special word in a variable for later use
+our_special_word = 'qwerty'
+
+def remove_ascii_words(df):
+    """ removes non-ascii characters from the 'texts' column in df.
+    It returns the words containig non-ascii characers.
+    """
+    non_ascii_words = []
+    for i in range(len(df)):
+        for word in df.loc[i, 'text'].split(' '):
+            if any([ord(character) >= 128 for character in word]):
+                non_ascii_words.append(word)
+                df.loc[i, 'text'] = df.loc[i, 'text'].replace(word, our_special_word)
+    return non_ascii_words
+
+non_ascii_words = remove_ascii_words(train_data)
+
+print("Replaced {} words with characters with an ordinal >= 128 in the train data.".format(
+    len(non_ascii_words)))
+def get_good_tokens(sentence):
+    replaced_punctation = list(map(lambda token: re.sub('[^0-9A-Za-z!?]+', '', token), sentence))
+    removed_punctation = list(filter(lambda token: token, replaced_punctation))
+    return removed_punctation
+# Here we get transform the documents into sentences for the word2vecmodel
+# we made a function such that later on when we make the submission, we don't need to write duplicate code
+def w2v_preprocessing(df):
+    """ All the preprocessing steps for word2vec are done in this function.
+    All mutations are done on the dataframe itself. So this function returns
+    nothing.
+    """
+    df['text'] = df.text.str.lower()
+    df['document_sentences'] = df.text.str.split('.')  # split texts into individual sentences
+    df['tokenized_sentences'] = list(map(lambda sentences:
+                                         list(map(nltk.word_tokenize, sentences)),
+                                         df.document_sentences))  # tokenize sentences
+    df['tokenized_sentences'] = list(map(lambda sentences:
+                                         list(map(get_good_tokens, sentences)),
+                                         df.tokenized_sentences))  # remove unwanted characters
+    df['tokenized_sentences'] = list(map(lambda sentences:
+                                         list(filter(lambda lst: lst, sentences)),
+                                         df.tokenized_sentences))  # remove empty lists
+
+w2v_preprocessing(train_data)
+
+#LDA pre-processing
+def lda_get_good_tokens(df):
+    df['text'] = df.text.str.lower()
+    df['tokenized_text'] = list(map(nltk.word_tokenize, df.text))
+    df['tokenized_text'] = list(map(get_good_tokens, df.tokenized_text))
+
+lda_get_good_tokens(train_data)
+
+#view at the top word frequencies now and get an idea of the words that are used mostly.
+tokenized_only_dict = Counter(np.concatenate(train_data.tokenized_text.values))
+
+tokenized_only_df = pd.DataFrame.from_dict(tokenized_only_dict, orient='index')
+tokenized_only_df.rename(columns={0: 'count'}, inplace=True)
+
+tokenized_only_df.sort_values('count', ascending=False, inplace=True)
+
+# I made a function out of this since I will use it again later on 
+def word_frequency_barplot(df, nr_top_words=50):
+    """ df should have a column named count.
+    """
+    fig, ax = plt.subplots(1,1,figsize=(20,5))
+
+    sns.barplot(list(range(nr_top_words)), df['count'].values[:nr_top_words], palette='hls', ax=ax)
+
+    ax.set_xticks(list(range(nr_top_words)))
+    ax.set_xticklabels(df.index[:nr_top_words], fontsize=14, rotation=90)
+    return ax
+    
+ax = word_frequency_barplot(tokenized_only_df)
+ax.set_title("Word Frequencies", fontsize=16);
+
+#remove words that mean little
+def remove_stopwords(df):
+    """ Removes stopwords based on a known set of stopwords
+    available in the nltk package. In addition, we include our
+    made up word in here.
+    """
+    # Luckily nltk already has a set of stopwords that we can remove from the texts.
+    stopwords = nltk.corpus.stopwords.words('english')
+    # we'll add our own special word in here 'qwerty'
+    stopwords.append(our_special_word)
+
+    df['stopwords_removed'] = list(map(lambda doc:
+                                       [word for word in doc if word not in stopwords],
+                                       df['tokenized_text']))
+
+remove_stopwords(train_data)
+
+#stemming
+def stem_words(df):
+    lemm = nltk.stem.WordNetLemmatizer()
+    df['lemmatized_text'] = list(map(lambda sentence:
+                                     list(map(lemm.lemmatize, sentence)),
+                                     df.stopwords_removed))
+
+    p_stemmer = nltk.stem.porter.PorterStemmer()
+    df['stemmed_text'] = list(map(lambda sentence:
+                                  list(map(p_stemmer.stem, sentence)),
+                                  df.lemmatized_text))
+
+stem_words(train_data)
+
+#vectorize words
+dictionary = Dictionary(documents=train_data.stemmed_text.values)
+
+print("Found {} words.".format(len(dictionary.values())))
+
+dictionary.filter_extremes(no_above=0.8, no_below=3)
+
+dictionary.compactify()  # Reindexes the remaining words after filtering
+print("Left with {} words.".format(len(dictionary.values())))
+
+#Make a BOW for every document
+def document_to_bow(df):
+    df['bow'] = list(map(lambda doc: dictionary.doc2bow(doc), df.stemmed_text))
+    
+document_to_bow(train_data)
+
+# we make a function such that later on when we make the submission, we don't need to write duplicate code
+def lda_preprocessing(df):
+    """ All the preprocessing steps for LDA are combined in this function.
+    All mutations are done on the dataframe itself. So this function returns
+    nothing.
+    """
+    lda_get_good_tokens(df)
+    remove_stopwords(df)
+    stem_words(df)
+    document_to_bow(df)
+    
+#visualize the cleaned words frequenies
+cleansed_words_df = pd.DataFrame.from_dict(dictionary.token2id, orient='index')
+cleansed_words_df.rename(columns={0: 'id'}, inplace=True)
+
+cleansed_words_df['count'] = list(map(lambda id_: dictionary.dfs.get(id_), cleansed_words_df.id))
+del cleansed_words_df['id']    
+
+cleansed_words_df.sort_values('count', ascending=False, inplace=True)
+
+ax = word_frequency_barplot(cleansed_words_df)
+ax.set_title("Document Frequencies (Number of documents a word appears in)", fontsize=16);
+
+EAP_words = list(np.concatenate(train_data.loc[train_data.author == 'EAP', 'stemmed_text'].values))
+HPL_words = list(np.concatenate(train_data.loc[train_data.author == 'HPL', 'stemmed_text'].values))
+MWS_words = list(np.concatenate(train_data.loc[train_data.author == 'MWS', 'stemmed_text'].values))
+
+EAP_word_frequencies = {word: EAP_words.count(word) for word in cleansed_words_df.index[:50]}
+HPL_word_frequencies = {word: HPL_words.count(word) for word in cleansed_words_df.index[:50]}
+MWS_word_frequencies = {word: MWS_words.count(word) for word in cleansed_words_df.index[:50]}
+
+frequencies_df = pd.DataFrame(index=cleansed_words_df.index[:50])
+
+frequencies_df['MWS_freq'] = list(map(lambda word:
+                                      MWS_word_frequencies[word],
+                                      frequencies_df.index))
+frequencies_df['MWS_HPL_freq'] = list(map(lambda word:
+                                          MWS_word_frequencies[word] + HPL_word_frequencies[word],
+                                          frequencies_df.index))
+frequencies_df['MWS_HPL_EAP_freq'] = list(map(lambda word:
+                                              MWS_word_frequencies[word] + HPL_word_frequencies[word] + EAP_word_frequencies[word],
+                                              frequencies_df.index))
+                                              
+fig, ax = plt.subplots(1,1,figsize=(20,5))
+
+nr_top_words = len(frequencies_df)
+nrs = list(range(nr_top_words))
+sns.barplot(nrs, frequencies_df['MWS_HPL_EAP_freq'].values, color='b', ax=ax, label="EAP")
+sns.barplot(nrs, frequencies_df['MWS_HPL_freq'].values, color='g', ax=ax, label="HPL")
+sns.barplot(nrs, frequencies_df['MWS_freq'].values, color='r', ax=ax, label="MWS")
+
+ax.set_title("Word frequencies per author", fontsize=16)
+ax.legend(prop={'size': 16})
+ax.set_xticks(nrs)
+ax.set_xticklabels(frequencies_df.index, fontsize=14, rotation=90);
+
+#LDA training
+corpus = train_data.bow
+
+%%time
+num_topics = 150
+#A multicore approach to decrease training time
+LDAmodel = LdaMulticore(corpus=corpus,
+                        id2word=dictionary,
+                        num_topics=num_topics,
+                        workers=4,
+                        chunksize=4000,
+                        passes=7,
+                        alpha='asymmetric')
+                        
+#LDA topic insection 
+def document_to_lda_features(lda_model, document):
+    """ Transforms a bag of words document to features.
+    It returns the proportion of how much each topic was
+    present in the document.
+    """
+    topic_importances = LDAmodel.get_document_topics(document, minimum_probability=0)
+    topic_importances = np.array(topic_importances)
+    return topic_importances[:,1]
+
+train_data['lda_features'] = list(map(lambda doc:
+                                      document_to_lda_features(LDAmodel, doc),
+                                      train_data.bow))
+                                      
+# continue with the author individual topic distributions and let's see some words that come with the topics.
+EAP_topic_distribution = train_data.loc[train_data.author == 'EAP', 'lda_features'].mean()
+HPL_topic_distribution = train_data.loc[train_data.author == 'HPL', 'lda_features'].mean()
+MWS_topic_distribution = train_data.loc[train_data.author == 'MWS', 'lda_features'].mean()
+
+fig, [ax1,ax2,ax3] = plt.subplots(3,1,figsize=(20,10))
+
+nr_top_bars = 5
+
+ax1.set_title("EAP topic distributions", fontsize=16)
+ax2.set_title("HPL topic distributions", fontsize=16)
+ax3.set_title("MWS topic distributions", fontsize=16)
+ax3.text(-10, 0.04, "Average Probability of Topic", fontsize=30, ha="center", va="center",
+         rotation="vertical")
+
+for ax, distribution, color in zip([ax1,ax2,ax3],
+                                   [EAP_topic_distribution,HPL_topic_distribution,MWS_topic_distribution],
+                                   ['b','g','r']):
+    # Individual distribution barplots
+    ax.bar(range(len(distribution)), distribution, alpha=0.7)
+    rects = ax.patches
+    for i in np.argsort(distribution)[-nr_top_bars:]:
+        rects[i].set_color(color)
+        rects[i].set_alpha(1)
+    # General plotting adjustments
+    ax.set_xlim(-1, 150)
+    ax.set_xticks(range(20,149,20))
+    ax.set_xticklabels(range(20,149,20), fontsize=16)
+    ax.set_ylim(0,0.02)
+    ax.set_yticks([0,0.01,0.02])
+    ax.set_yticklabels([0,0.01,0.02], fontsize=16)
+
+fig.tight_layout(h_pad=3.)
+
+# what words these top topics contain.
+def get_topic_top_words(lda_model, topic_id, nr_top_words=5):
+    """ Returns the top words for topic_id from lda_model.
+    """
+    id_tuples = lda_model.get_topic_terms(topic_id, topn=nr_top_words)
+    word_ids = np.array(id_tuples)[:,0]
+    words = map(lambda id_: lda_model.id2word[id_], word_ids)
+    return words
+    
+for author, distribution in zip(['EAP', 'HPL', 'MWS'], [EAP_topic_distribution, HPL_topic_distribution, MWS_topic_distribution]):
+    print("Looking up top words from top topics from {}.".format(author))
+    for x in sorted(np.argsort(distribution)[-5:]):
+        top_words = get_topic_top_words(LDAmodel, x)
+        print("For topic {}, the top words are: {}.".format(x, ", ".join(top_words)))
+    print("")
+    
+def show_image(base64_encoded_image):
+    """ Decodes a base64 encoded image and plots it.
+    """
+    fig, ax = plt.subplots(figsize=(10,10))
+
+    decoded_image = base64.b64decode(base64_encoded_image)
+    img = io.BytesIO(decoded_image)
+    img = mpimg.imread(img, format='PNG')
+
+    ax.imshow(img)
+    ax.axis('off');
+    
+# word2vec training 
+sentences = []
+for sentence_group in train_data.tokenized_sentences:
+    sentences.extend(sentence_group)
+
+print("Number of sentences: {}.".format(len(sentences)))
+print("Number of texts: {}.".format(len(train_data)))
+
+%%time
+# Set values for various parameters
+num_features = 200    # Word vector dimensionality
+min_word_count = 3    # Minimum word count
+num_workers = 4       # Number of threads to run in parallel
+context = 6           # Context window size
+downsampling = 1e-3   # Downsample setting for frequent words
+
+# Initialize and train the model
+W2Vmodel = Word2Vec(sentences=sentences,
+                    sg=1,
+                    hs=0,
+                    workers=num_workers,
+                    size=num_features,
+                    min_count=min_word_count,
+                    window=context,
+                    sample=downsampling,
+                    negative=5,
+                    iter=6)
+                    
+# word2vec feature inspection
+def get_w2v_features(w2v_model, sentence_group):
+    """ Transform a sentence_group (containing multiple lists
+    of words) into a feature vector. It averages out all the
+    word vectors of the sentence_group.
+    """
+    words = np.concatenate(sentence_group)  # words in text
+    index2word_set = set(w2v_model.wv.vocab.keys())  # words known to model
+    
+    featureVec = np.zeros(w2v_model.vector_size, dtype="float32")
+    
+    # Initialize a counter for number of words in a review
+    nwords = 0
+    # Loop over each word in the comment and, if it is in the model's vocabulary, add its feature vector to the total
+    for word in words:
+        if word in index2word_set: 
+            featureVec = np.add(featureVec, w2v_model[word])
+            nwords += 1.
+
+    # Divide the result by the number of words to get the average
+    if nwords > 0:
+        featureVec = np.divide(featureVec, nwords)
+    return featureVec
+
+train_data['w2v_features'] = list(map(lambda sen_group:
+                                      get_w2v_features(W2Vmodel, sen_group),
+                                      train_data.tokenized_sentences))
+                                      
+EAP_w2v_distribution = train_data.loc[train_data.author == 'EAP', 'w2v_features'].mean()
+HPL_w2v_distribution = train_data.loc[train_data.author == 'HPL', 'w2v_features'].mean()
+MWS_w2v_distribution = train_data.loc[train_data.author == 'MWS', 'w2v_features'].mean()
+
+fig, [ax1,ax2,ax3] = plt.subplots(3,1,figsize=(20,10))
+
+nr_top_bars = 5
+
+ax1.set_title("EAP w2v feature distributions", fontsize=16)
+ax2.set_title("HPL w2v feature distributions", fontsize=16)
+ax3.set_title("MWS w2v feature distributions", fontsize=16)
+ax3.text(-10, 2.3, "Average feature vectors", fontsize=30, ha="center", va="center", rotation="vertical")
+
+for ax, distribution, color in zip([ax1,ax2,ax3], [EAP_w2v_distribution,HPL_w2v_distribution,MWS_w2v_distribution], ['b','g','r']):
+    # Individual distribution barplots
+    ax.bar(range(len(distribution)), distribution, alpha=0.7)
+    rects = ax.patches
+    for i in np.argsort(distribution)[-nr_top_bars:]:
+        rects[i].set_color(color)
+        rects[i].set_alpha(1)
+    # General plotting adjustments
+    ax.set_xlim(-1, 200)
+    ax.set_xticks(range(20,199,20))
+    ax.set_xticklabels(range(20,199,20), fontsize=16)
+    ax.set_ylim(-0.8,0.8)
+
+fig.tight_layout(h_pad=3.)
+
+# classification and hyperparameter tuning
+label_encoder = LabelEncoder()
+
+label_encoder.fit(train_data.author)
+train_data['author_id'] = label_encoder.transform(train_data.author)
+
+def get_cross_validated_model(model, param_grid, X, y, nr_folds=5):
+    """ Trains a model by doing a grid search combined with cross validation.
+    args:
+        model: your model
+        param_grid: dict of parameter values for the grid search
+    returns:
+        Model trained on entire dataset with hyperparameters chosen from best results in the grid search.
+    """
+    # train the model (since the evaluation is based on the logloss, we'll use neg_log_loss here)
+    grid_cv = GridSearchCV(model, param_grid=param_grid, scoring='neg_log_loss', cv=nr_folds, n_jobs=-1, verbose=True)
+    best_model = grid_cv.fit(X, y)
+    # show top models with parameter values
+    result_df = pd.DataFrame(best_model.cv_results_)
+    show_columns = ['mean_test_score', 'mean_train_score', 'rank_test_score']
+    for col in result_df.columns:
+        if col.startswith('param_'):
+            show_columns.append(col)
+    display(result_df[show_columns].sort_values(by='rank_test_score').head())
+    return best_model
+    
+# since train_data['lda_features'] and train_data['w2v_features'] don't have the needed shape and type yet,
+# we first have to transform every entry
+X_train_lda = np.array(list(map(np.array, train_data.lda_features)))
+X_train_w2v = np.array(list(map(np.array, train_data.w2v_features)))
+X_train_combined = np.append(X_train_lda, X_train_w2v, axis=1)
+
+# store all models in a dictionary
+models = dict()
+
+# logistic regression(machine learning algorithem)
+# LDA features only
+lr = LogisticRegression()
+
+param_grid = {'penalty': ['l1', 'l2']}
+
+best_lr_lda = get_cross_validated_model(lr, param_grid, X_train_lda, train_data.author_id)
+
+models['best_lr_lda'] = best_lr_lda
+
+# Word2Vec features only
+lr = LogisticRegression()
+
+param_grid = {'penalty': ['l1', 'l2']}
+
+best_lr_w2v = get_cross_validated_model(lr, param_grid, X_train_w2v, train_data.author_id)
+
+models['best_lr_w2v'] = best_lr_w2v
+
+# LDA and Word2Vec combined
+lr = LogisticRegression()
+
+param_grid = {'penalty': ['l1', 'l2']}
+
+best_lr_combined = get_cross_validated_model(lr, param_grid, X_train_combined, train_data.author_id)
+
+models['best_lr_combined'] = best_lr_combined
+
+# model selection
+for name, model in models.items():
+    print("Model {} has a test score of: {:0.4f}".format(name, float(model.best_score_)))
+    
+# make a submission 
+test_data = pd.read_csv('D:/programs/WinPython-64bit-3.6.2.0Qt5/notebooks/new paper project/LDA & w2v/results/test/test.csv')
+
+print(test_data.shape)
+test_data.head(3)
+
+non_ascii_words = remove_ascii_words(test_data)
+
+print("Replaced {} words with characters with an ordinal >= 128 in the test data.".format(
+    len(non_ascii_words)))
+    
+lda_preprocessing(test_data)
+w2v_preprocessing(test_data)
+
+test_data['lda_features'] = list(map(lambda doc:
+                                     document_to_lda_features(LDAmodel, doc),
+                                     test_data.bow))
+
+test_data['w2v_features'] = list(map(lambda sen_group:
+                                     get_w2v_features(W2Vmodel, sen_group),
+                                     test_data.tokenized_sentences))
+                                     
+train_data['author_id'] = label_encoder.transform(train_data.author)
+
+X_test_lda = np.array(list(map(np.array, test_data.lda_features)))
+X_test_w2v = np.array(list(map(np.array, test_data.w2v_features)))
+X_test_combined = np.append(X_test_lda, X_test_w2v, axis=1)
+
+# make classification 
+submission_predictions = best_lr_combined.predict_proba(X_test_combined)
+
+label_encoder.classes_  # exactly the order in which we need to submit the writers
+
+result = np.append(test_data.id.values.reshape(-1,1), submission_predictions, axis=1)
+
+submission_df = pd.DataFrame(data=result, columns=['id', 'EAP', 'HPL', 'MWS'])
+
+submission_df.to_csv('submission.csv', index=False)
