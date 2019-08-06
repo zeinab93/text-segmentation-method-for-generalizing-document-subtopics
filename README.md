@@ -2,5 +2,4 @@
 using combination of word embedding and LDA to find the similarity between documents
 
 requirements:
-jupyter network
-gensim
+jupyter network/gensim
